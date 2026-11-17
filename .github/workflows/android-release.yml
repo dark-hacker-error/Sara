@@ -105,6 +105,10 @@ jobs:
           fi
           bash ./gradlew :app:assembleRelease --no-daemon --stacktrace
 
+      - name: Unit tests
+        working-directory: android
+        run: bash ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
+
       - name: Collect APK
         id: apk
         run: |
