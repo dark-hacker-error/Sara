@@ -18,6 +18,9 @@ import kotlinx.coroutines.SupervisorJob
  */
 class SaraContainer(app: Application) {
 
+    /** Application context. Held as a property so ViewModels and services share one entry point. */
+    val context: android.content.Context = app
+
     /** Application-lifetime scope for anything that outlives a screen. */
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 

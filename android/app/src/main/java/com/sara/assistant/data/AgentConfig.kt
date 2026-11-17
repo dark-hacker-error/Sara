@@ -50,18 +50,6 @@ data class AgentConfig(
         get() = enabled && model.isNotBlank() &&
             (provider == ProviderKind.GEMINI_NATIVE || (baseUrl.isNotBlank() && apiKey.isNotBlank()))
 
-    fun toWire(): WireAgent = WireAgent(
-        id = id,
-        name = name,
-        role = role.name,
-        enabled = enabled,
-        provider = provider.name,
-        base_url = baseUrl,
-        api_key = apiKey,
-        model = model,
-        system_prompt = systemPrompt,
-    )
-
     companion object {
         /** Defaults matching the two subagents the backend ships with. */
         fun defaults(): List<AgentConfig> = listOf(
@@ -80,17 +68,3 @@ data class AgentConfig(
         )
     }
 }
-
-/** JSON shape the app sends to the backend. Snake_case because it crosses a language boundary. */
-@Suppress("PropertyName")
-data class WireAgent(
-    val id: String,
-    val name: String,
-    val role: String,
-    val enabled: Boolean,
-    val provider: String,
-    val base_url: String,
-    val api_key: String,
-    val model: String,
-    val system_prompt: String,
-)

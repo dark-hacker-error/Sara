@@ -41,7 +41,7 @@ object LiveCatalog {
 }
 
 /** Default persona. Editable from Settings; shipped to both Live and the backend. */
-const val DEFAULT_SYSTEM_PROMPT = """
+val DEFAULT_SYSTEM_PROMPT = """
 You are Sara, a warm, quick-witted voice assistant living on the user's Android phone.
 You speak Hinglish naturally (Hindi + English) and mirror the user's language.
 

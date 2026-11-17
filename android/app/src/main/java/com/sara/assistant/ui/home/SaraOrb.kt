@@ -1,6 +1,7 @@
 package com.sara.assistant.ui.home
 
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -41,8 +42,16 @@ fun SaraOrb(
         label = "rotation",
     )
 
-    val smoothedInput by animateFloatAsState(inputLevel.coerceIn(0f, 1f), label = "input")
-    val smoothedOutput by animateFloatAsState(outputLevel.coerceIn(0f, 1f), label = "output")
+    val smoothedInput: Float by animateFloatAsState(
+        targetValue = inputLevel.coerceIn(0f, 1f),
+        animationSpec = tween(220),
+        label = "input",
+    )
+    val smoothedOutput: Float by animateFloatAsState(
+        targetValue = outputLevel.coerceIn(0f, 1f),
+        animationSpec = tween(220),
+        label = "output",
+    )
 
     // Which level drives the core: the mic when listening, the model when speaking.
     val activity = when (state) {
@@ -95,21 +104,17 @@ fun SaraOrb(
         val baseRadius = maxRadius * 0.62f
         val phase = rotation / 180f * PI.toFloat()
         for (index in 0 until barCount) {
-            val angle = (index.toFloat() / barCount) * 2f * PI.toFloat()
-            val wobble = (sin(phase * 2f + index * 0.35f) + 1f) / 2f
-            val height = maxRadius * (0.05f + activity * 0.22f * wobble)
-            val from = Offset(
-                center.x + cos(angle) * baseRadius,
-                center.y + sin(angle) * baseRadius,
-            )
-            val to = Offset(
-                center.x + cos(angle) * (baseRadius + height),
-                center.y + sin(angle) * (baseRadius + height),
-            )
+            val angle: Float = (index.toFloat() / barCount) * 2f * PI.toFloat()
+            val wobble: Float = (sin(phase * 2f + index * 0.35f) + 1f) / 2f
+            val height: Float = maxRadius * (0.05f + activity * 0.22f * wobble)
+            val fromX: Float = center.x + cos(angle) * baseRadius
+            val fromY: Float = center.y + sin(angle) * baseRadius
+            val toX: Float = center.x + cos(angle) * (baseRadius + height)
+            val toY: Float = center.y + sin(angle) * (baseRadius + height)
             drawLine(
                 color = palette.accent.copy(alpha = 0.55f),
-                start = from,
-                end = to,
+                start = Offset(fromX, fromY),
+                end = Offset(toX, toY),
                 strokeWidth = 2.4f,
             )
         }

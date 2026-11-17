@@ -256,9 +256,10 @@ class SaraAccessibilityService : AccessibilityService() {
         }
         val typed = target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
         if (typed && submit) {
-            // ACTION_IME_ENTER only exists from API 30; older platforms do nothing here.
+            // There is no ACTION_IME_ENTER int constant; the action id lives on
+            // AccessibilityAction and only exists from API 30.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                target.performAction(AccessibilityNodeInfo.ACTION_IME_ENTER)
+                target.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
             }
         }
         return typed

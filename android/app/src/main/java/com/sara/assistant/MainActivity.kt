@@ -81,10 +81,10 @@ class MainActivity : ComponentActivity() {
                                 startActivitySafely(Permissions.accessibilitySettingsIntent())
                             },
                             openOverlay = {
-                                startActivitySafely(Permissions.overlaySettingsIntent(this))
+                                startActivitySafely(Permissions.overlaySettingsIntent(this@MainActivity))
                             },
                             openNotificationSettings = {
-                                startActivitySafely(Permissions.notificationSettingsIntent(this))
+                                startActivitySafely(Permissions.notificationSettingsIntent(this@MainActivity))
                             },
                         ),
                     )
