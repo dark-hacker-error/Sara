@@ -2,6 +2,7 @@ package com.sara.assistant.backend
 
 import com.sara.assistant.core.SaraLog
 import com.sara.assistant.data.SettingsRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow

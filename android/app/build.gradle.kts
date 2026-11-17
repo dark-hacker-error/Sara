@@ -12,8 +12,23 @@ val localProps = Properties().apply {
     if (f.exists()) f.inputStream().use { load(it) }
 }
 
-fun cfg(name: String, fallback: String): String =
-    (System.getenv(name) ?: localProps.getProperty(name) ?: fallback)
+/**
+ * Reads a value from the environment first, then local.properties, then the fallback.
+ * Blank values are treated as absent: CI always defines the signing env vars (as empty
+ * strings when the secrets are unset), and `file("")` throws during configuration.
+ */
+fun opt(name: String): String? {
+    val fromEnv = System.getenv(name)?.takeIf { it.isNotBlank() }
+    val fromProps = localProps.getProperty(name)?.takeIf { it.isNotBlank() }
+    return fromEnv ?: fromProps
+}
+
+fun cfg(name: String, fallback: String): String = opt(name) ?: fallback
+
+/** A real release keystore, if one was supplied. Otherwise release builds are debug-signed. */
+val releaseKeystore: java.io.File? =
+    opt("SARA_KEYSTORE_PATH")?.let { java.io.File(it) }?.takeIf { it.exists() }
+        ?: rootProject.file("sara-release.jks").takeIf { it.exists() }
 
 android {
     namespace = "com.sara.assistant"
@@ -34,10 +49,9 @@ android {
 
     signingConfigs {
         create("release") {
-            val ksPath = cfg("SARA_KEYSTORE_PATH", rootProject.file("sara-release.jks").absolutePath)
-            val ks = file(ksPath)
-            if (ks.exists()) {
-                storeFile = ks
+            val keystore = releaseKeystore
+            if (keystore != null) {
+                storeFile = keystore
                 storePassword = cfg("SARA_KEYSTORE_PASSWORD", "sara-release")
                 keyAlias = cfg("SARA_KEY_ALIAS", "sara")
                 keyPassword = cfg("SARA_KEY_PASSWORD", "sara-release")
@@ -52,8 +66,11 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Fall back to debug signing so CI can always produce an installable APK,
             // unless a real release keystore is supplied (see README).
-            signingConfig = if (file(cfg("SARA_KEYSTORE_PATH", rootProject.file("sara-release.jks").absolutePath)).exists())
-                signingConfigs.getByName("release") else signingConfigs.getByName("debug")
+            signingConfig = if (releaseKeystore != null) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
         debug {
             isMinifyEnabled = false
