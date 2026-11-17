@@ -79,7 +79,8 @@ class DiagnosticsRunner(
 
     fun checkInternet(): DiagnosticCheck {
         val manager = context.getSystemService(ConnectivityManager::class.java)
-        val capabilities = manager?.activeNetworkCapabilities
+        // There is no `activeNetworkCapabilities` property; capabilities belong to a Network.
+        val capabilities = manager?.activeNetwork?.let { manager.getNetworkCapabilities(it) }
         return when {
             capabilities == null -> DiagnosticCheck(
                 name = "Internet",
