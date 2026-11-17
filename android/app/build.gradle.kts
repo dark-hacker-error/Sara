@@ -1,3 +1,4 @@
+import java.io.File
 import java.util.Properties
 
 plugins {
@@ -26,8 +27,8 @@ fun opt(name: String): String? {
 fun cfg(name: String, fallback: String): String = opt(name) ?: fallback
 
 /** A real release keystore, if one was supplied. Otherwise release builds are debug-signed. */
-val releaseKeystore: java.io.File? =
-    opt("SARA_KEYSTORE_PATH")?.let { java.io.File(it) }?.takeIf { it.exists() }
+val releaseKeystore: File? =
+    opt("SARA_KEYSTORE_PATH")?.let { File(it) }?.takeIf { it.exists() }
         ?: rootProject.file("sara-release.jks").takeIf { it.exists() }
 
 android {
