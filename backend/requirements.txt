@@ -1,8 +1,15 @@
-# Sara backend — agent orchestration for the Android app.
+# Sara backend — runtime deps, pinned.
 #
-# Runtime deps only. `google-adk` pulls in google-genai, FastAPI, uvicorn, websockets and pydantic.
-google-adk>=2.14,<3
+# Python 3.11+ required (google-adk's own constraint). Tested on 3.12 and 3.14.
+google-adk==2.14.1
+google-genai==2.34.0
 # ADK's LiteLlm wrapper needs litellm installed separately (google-adk[extensions]).
-litellm>=1.84
-# httpx is used by the /models auto-fetch endpoint and the fetch_url tool.
-httpx>=0.28
+litellm==1.109.1
+# Used by /v1/models/list and the research agent's fetch_url tool.
+httpx==0.28.1
+# Imported directly by app/main.py for the ASGI server and the WebSocket endpoint.
+fastapi==0.163.1
+uvicorn==0.54.0
+websockets==15.0.1
+pydantic==2.14.3
+python-dotenv==1.2.4

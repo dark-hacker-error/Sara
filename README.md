@@ -4,10 +4,9 @@ An Android voice assistant that actually *does* things: real-time speech-to-spee
 **Gemini Live API**, and a planner/subagent team on a **Python + FastAPI + Google ADK**
 backend that can read your screen and tap it.
 
-This repository is **milestone 1: the foundation**. Voice, delegation, phone control,
-per-subagent model config and the model auto-fetch flow are wired end to end. The
-"what's not done yet" list at the bottom is deliberately blunt — read it before assuming
-anything works.
+This is **milestone 1 (foundation) plus a setup-hardening pass**. Voice, delegation, phone
+control, per-subagent model config, diagnostics and the four connection modes are wired end
+to end. Section 10 is the honest list of what is still missing.
 
 ---
 
@@ -15,64 +14,63 @@ anything works.
 
 ```
 ┌────────────────────────── Android app (Kotlin + Compose) ──────────────────────────┐
-│                                                                                    │
 │   AudioEngine            LiveSessionManager                 SaraAccessibilityService │
-│   16kHz mic PСМ ───────▶ (OkHttp WebSocket) ◀──── 24kHz PCM  read tree / gesture /   │
+│   16kHz mic PCM ───────▶ (OkHttp WebSocket) ◀──── 24kHz PCM  read tree / gestures /  │
 │   barge-in flush         │        ▲                          type / global actions    │
-│                          │        │                                                    │
-│                          ▼        │ toolResponse                                     │
-│              wss://…BidiGenerateContent  (Gemini Live, direct)                       │
+│                          │        │ toolResponse                                     │
+│              wss://…BidiGenerateContent  (Gemini Live — direct, not proxied)          │
 │                          │                                                           │
 │                    toolCall: delegate_task(goal)                                     │
-│                          │                                                           │
 │                          ▼                                                           │
 │                   DelegationRouter ──────────▶ BackendClient (own WebSocket)  ───────┼──┐
 │                          ▲                            │                              │  │
 │                          └──── device_action ──────────┘                              │  │
 └───────────────────────────────────────────────────────────────────────────────────────┘  │
-                                                                                            │
 ┌─────────────────────────────── Backend (Python) ─────────────────────────────────────────┐│
 │  FastAPI  /ws/session ◀───────────────────────────────────────────────────────────────────┘│
-│      │                                                                                    │
 │      │  per delegation: build agents from the *current* config snapshot                   │
 │      ▼                                                                                    │
 │   sara_orchestrator  ──transfer──▶  phone_control_agent  ──▶ DeviceBridge ──▶ (phone)      │
-│      (planner)        ──transfer──▶  research_agent      ──▶ web_search / fetch_url /      │
-│                                                              google_search grounding       │
-│  POST /v1/models/list  →  {base_url}/models  (auto-fetch + free tagging)                    │
+│      (planner)        ──transfer──▶  research_agent      ──▶ web_search / fetch_url        │
+│  GET /health            → diagnostics                                       │
+│  POST /v1/models/list   → {base_url}/models  (auto-fetch + free tagging)    │
 └────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Why two sockets?** Simple conversation stays on the direct-to-Gemini socket: one hop,
-lowest latency, works even when the backend is asleep. Only `delegate_task` crosses to the
-backend. The Live client sits behind an interface (`LiveToolExecutor`) so a
-server-to-server audio setup can be added later without touching the session logic.
+**Why two sockets?** Conversation stays on the direct-to-Gemini socket: one hop, lowest
+latency, and it still works when the backend is asleep. Only `delegate_task` crosses to the
+backend. The Live client sits behind `LiveToolExecutor`, so a server-to-server audio setup can
+be added later without touching session logic.
 
 ---
 
-## 2. Verified against the docs (two corrections to the original brief)
+## 2. Model ids — verified, not remembered
 
-The brief asked for `gemini-3.1-flash-live-preview` with
+The brief asked for `gemini-3.1-flash-live-preview` as "latest" and
 `gemini-2.5-flash-native-audio-latest` as fallback. Checked against
-`ai.google.dev/gemini-api/docs/models`:
+`ai.google.dev/gemini-api/docs/models/gemini-3.8-live`:
 
-| Brief said | Reality |
-| --- | --- |
-| `gemini-3.1-flash-live-preview` = latest | It is marked **legacy**. The current default Live model is **`gemini-3.8-live`**, with `gemini-3.8-live-extended-thinking` for high-reasoning voice. |
-| fallback `gemini-2.5-flash-native-audio-latest` | **This id does not exist.** The real one is `gemini-2.5-flash-native-audio-preview-12-2025`. |
+- The Live model page says **"Stable: `gemini-3.8-live`"** and the migration guide says
+  *"Update your model string from `gemini-3.1-flash-live-preview` to `gemini-3.8-live`"*.
+  `gemini-3.1-flash-live-preview` is still served but is the legacy preview.
+- **`gemini-2.5-flash-native-audio-latest` does not exist.** The real id is
+  `gemini-2.5-flash-native-audio-preview-12-2025` (date-suffixed).
 
-So the shipped default is `gemini-3.8-live`, and both the legacy ids are offered as
-fallbacks. All three are **settings**, not constants (`data/LiveCatalog.kt`,
-`LiveSettings.model` / `.fallbackModel`). Two further facts that shaped the code:
+Defaults shipped: `gemini-3.8-live`, with `gemini-3.1-flash-live-preview` and
+`gemini-2.5-flash-native-audio-preview-12-2025` as fallbacks. All of them are **settings**
+(`data/LiveCatalog.kt`), never hardcoded — and Settings now has
+**Fetch Live models from Google** (`GET /v1beta/models`, filtered on
+`supportedGenerationMethods: bidiGenerateContent`) so you can pick from what your key can
+actually use.
 
-- Audio-only Live sessions are capped at **15 minutes**, so session resumption is
-  implemented (`sessionResumption` handle + reconnect, with model fallback on failure).
-- `behavior: NON_BLOCKING` (async function calling) is **not supported on the 3.1 Live
-  models**, so the tool declarations are generated per model in `LiveTools.declarationsFor`.
+Two more facts that shaped the code:
 
-Also confirmed by dumping `google.genai.types.Tool` to JSON: Live tool schemas need
-**uppercase** proto enum types (`"OBJECT"`, `"STRING"`). The newer *Interactions* API uses
-lowercase — copying from those docs silently breaks Live tool calling.
+- Audio-only Live sessions are capped at 15 minutes → session resumption + reconnect.
+- `behavior: NON_BLOCKING` is unsupported on 3.1 Live models → tool declarations are generated
+  per model in `LiveTools.declarationsFor`.
+- Live tool schemas need **uppercase** proto enums (`"OBJECT"`, `"STRING"`), verified by
+  dumping `google.genai.types.Tool`. The newer Interactions API uses lowercase; copying from
+  there silently breaks Live tool calling.
 
 ---
 
@@ -81,101 +79,185 @@ lowercase — copying from those docs silently breaks Live tool calling.
 ```
 Sara/
 ├── .github/workflows/android-release.yml   # CI: build APK + publish release, run backend tests
-├── android/                                # Kotlin + Jetpack Compose app
+├── android/
 │   └── app/src/main/java/com/sara/assistant/
-│       ├── SaraApp.kt, MainActivity.kt
 │       ├── core/          SaraContainer (DI), logging
-│       ├── data/          settings, encrypted store, LiveCatalog, remote/ModelCatalogClient
+│       ├── data/          settings, BackendEndpoint, LiveCatalog, remote model catalogs
 │       ├── live/          LiveProtocol, LiveSessionManager, AudioEngine, LiveTools
-│       ├── backend/       BackendClient (WebSocket) + wire frames
-│       ├── agent/         DelegationRouter (Live tool calls ⇄ backend)
+│       ├── backend/       BackendClient, HealthChecker
+│       ├── agent/         DelegationRouter
 │       ├── phone/         SaraAccessibilityService, PhoneController, AppRegistry
-│       ├── safety/        SafetyGuard (confirmation gate + hard stop)
+│       ├── safety/        SafetyGuard
 │       ├── service/       SaraForegroundService, OverlayBubbleService
-│       └── ui/            theme, SaraViewModel, home / onboarding / settings screens
-└── backend/                                # Python + FastAPI + ADK
+│       └── ui/            home / onboarding / settings / diagnostics, SaraViewModel
+└── backend/
+    ├── run.sh, run.bat     # one-command start (venv + deps + .env + server)
     └── app/
-        ├── main.py         FastAPI app, /health, /ws/session
+        ├── main.py         /health, /ws/session, startup banner
         ├── config.py       AgentSpec / AppConfig (per-subagent base_url + key + model)
         ├── store.py        runtime config store (reload without restart)
-        ├── session.py      per-connection orchestrator (Runner per delegation)
+        ├── session.py      per-connection orchestrator
         ├── device.py       DeviceBridge (awaits device_action results)
-        ├── models_api.py   POST /v1/models/list  (auto-fetch + free tagging)
-        └── agents/         factory.py (agent tree), tools.py (device + research tools)
+        ├── models_api.py   POST /v1/models/list
+        └── agents/         factory.py, tools.py
 ```
 
 ---
 
 ## 4. Backend setup
 
+**Python 3.11+** (google-adk's constraint). Tested on 3.12 and 3.14.
+
 ```bash
 cd backend
-python -m venv .venv && source .venv/bin/activate     # Python 3.11+ (tests run on 3.14)
+bash run.sh            # macOS/Linux: creates .venv, installs, seeds .env, starts
+run.bat                # Windows
+```
+
+Manual equivalent:
+
+```bash
+cd backend
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # then set GEMINI_API_KEY
+cp .env.example .env    # then set GEMINI_API_KEY
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Check it:
+`--host 0.0.0.0` is not optional for phone testing: bound to `127.0.0.1`, a phone on the same
+Wi-Fi can never connect.
 
-```bash
-curl -s localhost:8000/health | python -m json.tool
+Startup prints the address to try:
+
+```
+Sara backend 0.2.0 ready (protocol v1)
+Listening on 0.0.0.0:8000
+Health check: http://127.0.0.1:8000/health
+From your phone (same Wi-Fi): http://192.168.1.23:8000/health
+Phone WebSocket: ws://<host>:8000/ws/session
 ```
 
-Run the tests (offline, no API key needed):
+Verify:
+
+```bash
+curl -s http://127.0.0.1:8000/health | python -m json.tool
+```
+
+```json
+{
+  "status": "ok",
+  "version": "0.2.0",
+  "protocol": 1,
+  "adk_ready": true,
+  "gemini_key_present": true,
+  "orchestrator_model": "gemini-3.8-flash",
+  "subagents": [],
+  "config_generation": 0,
+  "live_model": "gemini-3.8-live"
+}
+```
+
+`adk_ready` and `gemini_key_present` are separate on purpose: the server can be up and healthy
+while still unable to run a task because no key is configured. The app shows both.
+
+Tests (offline, no key needed):
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest -q          # 16 tests
+python -m pytest -q      # 16 tests
 ```
-
-The app connects to `ws://<your-host>:8000/ws/session`. On an emulator the host is
-`10.0.2.2`; on a real phone use your machine's LAN IP and set it in Sara's Settings.
-
-### Subagent configuration
-
-Each subagent has its own **base URL, API key and model**, and the backend builds models
-with ADK's `LiteLlm` wrapper (`openai/<model>` + `api_base`) so any OpenAI-compatible
-endpoint works — OpenRouter, Together, Groq, Fireworks, LM Studio, vLLM, and Gemini itself.
-Setting a subagent to `GEMINI_NATIVE` uses ADK's native Gemini path instead.
-
-Config is pushed from the phone (`hello` / `config_update` frames) and the agent tree is
-rebuilt **on every delegation** from the current snapshot. That is the whole
-"reload without restart" mechanism — there is no cache to invalidate.
 
 ---
 
-## 5. Android setup
+## 5. Connect the phone to the backend — four ways
 
-Requirements: JDK 17, Android SDK with platform 36.
+The backend URL is a **setting**, stored on device. Enter a base `http://` URL; the app derives
+`ws://`/`wss://` and `/health` from it (`data/BackendEndpoint.kt`). Accepted inputs:
+`http://host:8000`, `https://host`, `ws://host:8000`, `wss://host/ws/session`, or a bare
+`host:8000`.
+
+### A) USB — most reliable, no Wi-Fi or internet needed
+
+```bash
+adb devices                       # your phone must appear as "device", not "unauthorized"
+adb reverse tcp:8000 tcp:8000     # forwards phone's 127.0.0.1:8000 to the PC's :8000
+```
+
+App → Settings → Backend → `http://127.0.0.1:8000` → **Test connection** → **Save**.
+
+`adb reverse` is per-connection: re-run it after unplugging the cable. It also works on mobile
+data, which is why it is the recommended first setup.
+
+### B) Same Wi-Fi
+
+1. Start the backend with `--host 0.0.0.0` (`run.sh` already does).
+2. Find the PC's LAN IPv4:
+   - Windows: `ipconfig` → "IPv4 Address" (e.g. `192.168.1.23`)
+   - macOS: `ipconfig getifaddr en0`
+   - Linux: `ip a` or `hostname -I`
+3. Allow inbound TCP 8000 in the PC firewall:
+   - Windows: `netsh advfirewall firewall add rule name="Sara 8000" dir=in action=allow protocol=TCP localport=8000`
+   - macOS: System Settings → Network → Firewall → Options → allow Python
+   - Linux (ufw): `sudo ufw allow 8000/tcp`
+4. Put the phone on the **same Wi-Fi** (turn mobile data off if the phone prefers it).
+5. App → Settings → Backend → `http://192.168.1.23:8000`.
+
+Many home routers enable "AP/client isolation", which blocks phone→PC traffic even on the same
+SSID. If health says *timeout*, that is the usual culprit — use USB instead.
+
+### C) Remote tunnel — works from anywhere
+
+- **Cloudflare Tunnel** (free, gives https):
+  ```bash
+  cloudflared tunnel --url http://localhost:8000
+  # prints e.g. https://random-words.trycloudflare.com
+  ```
+  Use `https://random-words.trycloudflare.com`. The app turns it into `wss://…/ws/session`.
+- **ngrok**: `ngrok http 8000` → use the printed `https://…` URL.
+- **Tailscale** (best for a permanent private address): install on PC and phone, then use the
+  PC's tailnet IP, e.g. `http://100.x.y.z:8000`.
+
+Tunnels are https, so no cleartext concerns. Don't expose `:8000` publicly without adding auth.
+
+### D) Emulator
+
+Backend on the host, app in the emulator: `http://10.0.2.2:8000`. (`10.0.2.2` is the
+emulator's alias for the host loopback — it does **not** exist on a real phone, which is
+exactly the bug in the original default.)
+
+---
+
+## 6. Android setup
+
+Requirements: JDK 17, Android SDK platform 36.
 
 ```bash
 cd android
 echo "sdk.dir=$ANDROID_HOME" > local.properties
-bash ./gradlew :app:assembleDebug          # (or ./gradlew on a real filesystem)
+bash ./gradlew :app:assembleDebug
 ```
 
-Get an APK from CI instead: push to `main` and the workflow publishes a release with
-`sara-<version>.apk` attached. Install it, then:
+Or use CI: push to `main`; the workflow publishes `sara-0.1.0.apk` on
+[Releases](https://github.com/dark-hacker-error/Sara/releases).
 
-1. Open Sara → the setup screen walks you through **Microphone**, **Accessibility
-   service**, **Display over other apps** and **Notifications**.
-2. Paste your **Gemini API key** (`aistudio.google.com`).
-3. Settings → Backend URL → point at your running backend.
-4. Settings → Subagents → **Add/Edit** → paste the base URL and key → **Fetch available
-   models** → pick one. Repeat for the research agent.
-5. Tap **Start talking**.
+On the phone:
 
-Current build defaults: `compileSdk`/`targetSdk` 36, `minSdk` 28, AGP 8.13.2, Kotlin 2.2.21,
+1. Open Sara → the setup screen walks through **Microphone**, **Accessibility service**,
+   **Display over other apps**, **Notifications**. It deep-links to each system screen.
+2. Paste the **Gemini API key** (`aistudio.google.com`) → Settings → **Fetch Live models from
+   Google** to confirm the key works and see which Live models are available.
+3. Settings → Backend → enter the URL from section 5 → **Test connection** → **Save**.
+4. Settings → Subagents → edit each → paste base URL + key → **Fetch available models** → pick.
+5. Open **Diagnostics** and get all green. Then **Start talking**.
+
+Build defaults: `compileSdk`/`targetSdk` 36, `minSdk` 28, AGP 8.13.2, Kotlin 2.2.21,
 Gradle 8.14.3.
 
 ---
 
-## 6. Wire protocols
+## 7. Wire protocols
 
 ### App ⇄ Gemini Live
-
-Straight from `ai.google.dev/api/live`, no invented fields:
 
 | Direction | Payload |
 | --- | --- |
@@ -183,12 +265,19 @@ Straight from `ai.google.dev/api/live`, no invented fields:
 | → | `{"realtimeInput": {"audio": {"data": "<b64>", "mimeType": "audio/pcm;rate=16000"}}}` |
 | → | `{"realtimeInput": {"text": "…"}}` / `{"realtimeInput": {"audioStreamEnd": true}}` |
 | → | `{"toolResponse": {"functionResponses": [{id, name, response}]}}` |
-| ← | `setupComplete`, `serverContent{modelTurn.parts[].inlineData, inputTranscription, outputTranscription, interimInputTranscription, interrupted, turnComplete}`, `toolCall`, `toolCallCancellation`, `goAway`, `sessionResumptionUpdate`, `usageMetadata` |
+| ← | `setupComplete`, `serverContent{modelTurn.parts[].inlineData, inputTranscription, outputTranscription, interrupted, turnComplete}`, `toolCall`, `toolCallCancellation`, `goAway`, `sessionResumptionUpdate`, `usageMetadata` |
 
-Two implementation notes worth knowing: the endpoint **frequently sends JSON in *binary*
-frames**, so both `onMessage(text)` and `onMessage(bytes)` feed the same decoder; and
-`activityHandling: START_OF_ACTIVITY_INTERRUPTS` is what provides barge-in, backed by a
-local mic-level flush so the cut-off doesn't wait for a round trip.
+Two rules that matter:
+
+1. **Nothing is sent before `setupComplete`.** The docs require it, and violating it is the
+   classic cause of close code **1007**. Mic frames are dropped until then; typed text is
+   queued.
+2. The endpoint **often sends JSON in binary frames**, so both `onMessage(text)` and
+   `onMessage(bytes)` feed the same decoder. A single frame can carry audio *and* a transcript
+   *and* usage metadata, so the decoder returns a list and every event is dispatched.
+
+Barge-in = `activityHandling: START_OF_ACTIVITY_INTERRUPTS` plus a local mic-level flush so the
+cut-off does not wait for a round trip.
 
 ### App ⇄ Backend
 
@@ -197,7 +286,7 @@ local mic-level flush so the cut-off doesn't wait for a round trip.
 | → | `hello` / `config_update` `{protocol, agents[], live_model, system_prompt}` |
 | → | `delegate` `{task_id, goal, kind}` · `cancel` `{task_id}` · `device_result` `{task_id, call_id, ok, data, error}` |
 | ← | `ready` `{protocol, agents[], live_model, config_generation}` |
-| ← | `step` `{task_id, agent, detail, status}` (drives the task timeline) |
+| ← | `step` `{task_id, agent, detail, status}` |
 | ← | `device_action` `{task_id, call_id, action, params}` |
 | ← | `delegate_result` `{task_id, ok, text}` · `error` `{message, task_id}` |
 
@@ -206,79 +295,97 @@ Device actions: `tap`, `long_press`, `swipe`, `scroll`, `tap_text`, `tap_node`, 
 
 ---
 
-## 7. Safety
+## 8. Troubleshooting
 
-- **Sensitive-action gate.** `SafetyGuard.classify` inspects the *action payload* (element
-  text, typed content, app name) for money/deletion/credential markers. A match is refused
-  the first time and reported to the planner as `NEEDS_CONFIRMATION`; the root agent's
-  instruction tells it to stop and ask out loud. The refusal lifts only after the user's
-  Live transcript reads as an affirmative, and approvals are single-use.
-- **Hard stop.** The Stop button, and the `stop_everything` tool (bound to "stop", "ruko",
-  "bas"), latch a stop flag that blocks further device actions and cancels the running task.
-- **Honest limitation.** Confirmation matching is keyword-based. It is a guard rail, not a
-  security boundary. Dedicated request/response confirmation in the UI is on the roadmap.
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `Connection refused at http://…` | Backend not running, or bound to `127.0.0.1` | Start with `--host 0.0.0.0` (`run.sh` does) |
+| `Timed out after 10s` | Firewall or AP isolation | Allow TCP 8000; disable client isolation; or use USB |
+| `Host not found` | Wrong IP / different network | Re-check the LAN IPv4; both devices on one Wi-Fi |
+| `Android blocked plain http://` | Cleartext policy | This build permits cleartext; if you still see it, use an https tunnel |
+| `TLS handshake failed` | Self-signed certificate | Use Cloudflare/ngrok, or plain http on LAN |
+| Backend connected, Gemini `error` | Live model id or key | Logcat `SaraWS` shows the close code; Settings → Fetch Live models |
+| Live close **1007** | Frame rejected — usually a wrong model id or a setup field that model does not support | Pick `gemini-3.8-live` in Settings |
+| Live close **1008** | Key/policy rejected | Re-copy the Gemini API key |
+| `Reconnect attempts exhausted` | Was blind-retrying a permanent error | No longer retried; the code + reason + hint are shown with **Fix & retry** |
+
+Logcat: `adb logcat -s SaraWS`.
 
 ---
 
-## 8. What works today
+## 9. Safety
 
-- **A signed, installable APK is built and published by CI** at
-  [Releases](https://github.com/dark-hacker-error/Sara/releases) (`sara-0.1.0.apk`,
-  APK Signature Scheme v2, 4 ABIs, minSdk 28). Every push to `main` refreshes it.
-- Live session: connect, mic streaming, 24 kHz playback, echo cancellation, barge-in,
-  input/output transcription, reconnect with resumption, model fallback.
-- Tool calling end to end: `delegate_task` → ADK planner → subagent → device action on the
-  phone → result back to Live as a `toolResponse`.
-- Accessibility: read the UI tree, tap by text/index/coordinate, long-press, swipe, scroll,
-  type text, back/home/recents, app launch, installed-app listing — all wired through the
-  WebSocket round trip.
-- Per-subagent base URL / key / model, runtime config reload, `/v1/models/list` auto-fetch
-  with key/URL/timeout/empty error classification and free-model tagging.
-- UI: onboarding with permission deep links, animated state orb (listening / thinking /
-  speaking / acting), live transcript, task-step timeline, settings, floating bubble.
-- 16 backend tests pass offline.
+- **Sensitive-action gate.** `SafetyGuard.classify` inspects the *action payload* (element text,
+  typed content, app name) for money/deletion/credential markers. A match is refused the first
+  time and reported to the planner as `NEEDS_CONFIRMATION`; the root agent's instruction tells
+  it to stop and ask out loud. Approval lifts only after the user's Live transcript reads as an
+  affirmative, and approvals are single-use.
+- **Hard stop.** The Stop button and the `stop_everything` tool ("stop", "ruko", "bas") latch a
+  flag that blocks further device actions and cancels the running task.
+- **Honest limitation.** Confirmation matching is keyword-based: a guard rail, not a security
+  boundary. A dedicated UI confirmation dialog is still on the roadmap.
 
-## 9. What is a stub or missing (read this)
+---
+
+## 10. What works / what is still a stub
+
+Works:
+
+- Signed APK built and published by CI (APK Signature Scheme v2, 4 ABIs, minSdk 28).
+- Live session: connect, mic streaming, 24 kHz playback, AEC, barge-in, transcripts,
+  resumption + reconnect, model fallback, permanent-vs-transient close handling.
+- `delegate_task` → ADK planner → subagent → accessibility action → `toolResponse`.
+- Accessibility: UI tree, tap by text/index/coords, long-press, swipe, scroll, type,
+  back/home/recents, app launch, installed-app listing.
+- Per-subagent base URL/key/model, runtime reload, `/v1/models/list` with error taxonomy.
+- Settings: backend URL + Test connection, Live model fetch, diagnostics, overlay bubble.
+- 16 offline backend tests.
+
+Stubs / not verified:
 
 | Item | Status |
 | --- | --- |
-| **Screenshot / MediaProjection vision** | **Not implemented.** No screen-capture code exists. Listed as optional in the brief; the agent works from the accessibility tree only. The manifest permission was removed rather than left dangling. |
-| **End-to-end run on a phone** | The APK compiles, is signed, and the backend suite passes. No Android device/emulator was available here, so the accessibility actions have **not** been executed against a live UI, and the Live handshake has **not** been made against the real API (that needs a real key). Treat first-run testing as required. |
-| **Web search quality** | `web_search` scrapes DuckDuckGo's no-JS HTML endpoint and `fetch_url` strips tags by regex. Brittle by design and documented as such. Gemini-native research agents use `google_search` grounding instead. |
-| **Subagent planner routing** | The app's `kind` hint (`device`/`research`) is passed to the planner as prompt context. ADK routes by model decision, so a hint is a nudge, not a route. |
-| **Multi-step retry policy** | Expressed in the orchestrator's instruction plus `RunConfig(max_llm_calls=25)`. There is no hard state machine with explicit retry/ask-user transitions yet. |
-| **Vision-based step verification** | Verification is limited to re-reading the accessibility tree. No pixel comparison. |
-| **Release signing** | CI falls back to debug signing unless `SARA_KEYSTORE_*` secrets are set, so builds from different CIs may not upgrade over each other. |
-| **Streaming TTS of planner output** | Planner text arrives whole per event; no incremental speech while a long task runs. |
-| **EncryptedSharedPreferences deprecation** | `androidx.security:security-crypto` is deprecated upstream with no drop-in replacement. Used as requested; expect a deprecation warning. |
-| **Settings load is synchronous** | `SettingsRepository` reads EncryptedSharedPreferences in its constructor on the main thread. Fine for a small blob, but it is a cold-start cost worth moving off-thread later. |
+| **On a real phone** | The APK builds and is signed, but no device was available here. Accessibility actions and the Live handshake have **not** been executed live. Do section 11. |
+| **Screenshot / MediaProjection** | Not implemented. The agent uses the accessibility tree only. |
+| **Web search** | `web_search` scrapes DuckDuckGo's no-JS endpoint; brittle by design. Gemini-native research agents use `google_search` grounding instead. |
+| **Planner routing hint** | `kind` is prompt context, not a forced route (ADK routes by model decision). |
+| **Retry state machine** | Orchestrator instruction + `RunConfig(max_llm_calls=25)`; no explicit retry/ask-user FSM. |
+| **Vision step verification** | Tree re-read only, no pixel comparison. |
+| **Release signing** | Falls back to debug signing unless `SARA_KEYSTORE_*` secrets are set. |
+| **Cleartext** | Enabled for this sideloaded build (LAN IPs cannot be expressed as `<domain>` rules). Flip to `false` + https for production. |
+| **Settings I/O** | `SettingsRepository` reads EncryptedSharedPreferences in its constructor on the main thread. |
 
 ---
 
-## 10. CI and releases
+## 11. Mujhe ab kya karna hai (5 steps)
 
-`.github/workflows/android-release.yml` runs on every push to `main`, on `v*` tags, and on
-manual dispatch:
-
-1. `build-apk` — sets up JDK 17 + Android SDK, builds `assembleRelease`, uploads the APK as
-   an artifact, then creates or updates a GitHub Release with `sara-<version>.apk`.
-2. `backend-tests` — installs `requirements-dev.txt` and runs `pytest`.
-
-Version comes from the tag (`v0.2.0` → `0.2.0`), a manual input, or defaults to `0.1.0`.
-A push to `main` refreshes the same rolling `v0.1.0` release; tagging creates a new one.
-
-To publish a real release build, add these repository secrets: `SARA_KEYSTORE_PATH`,
-`SARA_KEYSTORE_PASSWORD`, `SARA_KEY_ALIAS`, `SARA_KEY_PASSWORD`. Without them the workflow
-still ships an installable (debug-signed) APK.
+1. `cd backend && bash run.sh` → `.env` me `GEMINI_API_KEY` daalo → script dobara chalao.
+2. PC pe: `curl http://127.0.0.1:8000/health` → `"status":"ok"` dikhna chahiye.
+3. Phone USB se jodo: `adb devices` (device dikhe) → `adb reverse tcp:8000 tcp:8000`.
+4. App kholo → Settings → Backend → `http://127.0.0.1:8000` → **Test connection** → **Save** →
+   Settings → Gemini key + **Fetch Live models** → `gemini-3.8-live` select karo.
+5. **Diagnostics** kholo → sab green → **Start talking**. Red ho to wahan likha "Fix:" follow karo,
+   aur Logcat: `adb logcat -s SaraWS`.
 
 ---
 
-## 11. Secret handling
+## 12. CI and releases
 
-- The **Gemini API key** and every **subagent API key** live only in
-  `EncryptedSharedPreferences` on the device. They are never written to logs or to the repo.
-- The backend reads its own keys from `.env`, which is git-ignored.
+`.github/workflows/android-release.yml` runs on push to `main`, on `v*` tags, and manually:
+
+1. `build-apk` — JDK 17 + Android SDK, `assembleRelease`, artifact upload, GitHub Release with
+   `sara-<version>.apk`.
+2. `backend-tests` — installs `requirements-dev.txt`, runs `pytest`.
+
+A push to `main` refreshes the rolling `v0.1.0` release; a tag creates a new one. Optional
+secrets for real signing: `SARA_KEYSTORE_PATH`, `SARA_KEYSTORE_PASSWORD`, `SARA_KEY_ALIAS`,
+`SARA_KEY_PASSWORD`.
+
+---
+
+## 13. Secret handling
+
+- Gemini and per-subagent keys live only in `EncryptedSharedPreferences` on the device.
+- The backend reads its keys from `.env` (git-ignored).
 - CI uses repository secrets only.
-- **Rotate any token that has been shared in plain text.** A token pasted into a chat or
-  commit message should be treated as compromised and revoked at
-  `github.com/settings/tokens`.
+- **Rotate any token shared in plain text.**

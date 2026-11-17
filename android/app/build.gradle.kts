@@ -42,8 +42,14 @@ android {
         versionCode = cfg("SARA_VERSION_CODE", "1").toInt()
         versionName = cfg("SARA_VERSION_NAME", "0.1.0")
 
-        // Endpoints are configurable at runtime from Settings; these are just first-run defaults.
-        buildConfigField("String", "DEFAULT_BACKEND_WS", "\"${cfg("SARA_BACKEND_WS", "ws://10.0.2.2:8000/ws/session")}\"")
+        // Base HTTP URL of the backend. Configurable at runtime in Settings; this is only the
+        // first-run default. `127.0.0.1` is the USB (`adb reverse`) case, which is the most
+        // reliable way to test on a real phone.
+        buildConfigField(
+            "String",
+            "DEFAULT_BACKEND_URL",
+            "\"${cfg("SARA_BACKEND_URL", "http://127.0.0.1:8000")}\"",
+        )
         buildConfigField("String", "DEFAULT_LIVE_MODEL", "\"gemini-3.8-live\"")
         buildConfigField("String", "DEFAULT_LIVE_MODEL_FALLBACK", "\"gemini-3.1-flash-live-preview\"")
     }

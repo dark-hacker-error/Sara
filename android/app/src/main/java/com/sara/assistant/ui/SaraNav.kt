@@ -2,6 +2,7 @@ package com.sara.assistant.ui
 
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -10,12 +11,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.sara.assistant.ui.diagnostics.DiagnosticsScreen
 import com.sara.assistant.ui.home.HomeScreen
 import com.sara.assistant.ui.onboarding.OnboardingScreen
 import com.sara.assistant.ui.settings.SettingsScreen
@@ -33,6 +34,7 @@ private object Routes {
     const val ONBOARDING = "onboarding"
     const val HOME = "home"
     const val SETTINGS = "settings"
+    const val DIAGNOSTICS = "diagnostics"
 }
 
 @Composable
@@ -45,9 +47,15 @@ fun SaraApp(
     val liveState by viewModel.liveState.collectAsStateWithLifecycle()
     val permissions by viewModel.permissions.collectAsStateWithLifecycle()
     val backend by viewModel.backendConnection.collectAsStateWithLifecycle()
+    val backendError by viewModel.backendError.collectAsStateWithLifecycle()
     val modelFetch by viewModel.modelFetch.collectAsStateWithLifecycle()
     val notice by viewModel.notice.collectAsStateWithLifecycle()
     val bubbleVisible by viewModel.bubbleVisible.collectAsStateWithLifecycle()
+    val diagnostics by viewModel.diagnostics.collectAsStateWithLifecycle()
+    val runningDiagnostics by viewModel.runningDiagnostics.collectAsStateWithLifecycle()
+    val backendTest by viewModel.backendTest.collectAsStateWithLifecycle()
+    val testingBackend by viewModel.testingBackend.collectAsStateWithLifecycle()
+    val liveModels by viewModel.liveModels.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -60,7 +68,10 @@ fun SaraApp(
     }
 
     Scaffold(
-        containerColor = Color.Transparent,
+        // A transparent Scaffold leaves LocalContentColor at its black default, which is why
+        // the title was invisible on the dark background. Use real theme colors instead.
+        containerColor = MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.onBackground,
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         NavHost(
@@ -81,7 +92,8 @@ fun SaraApp(
                     onOpenOverlay = permissionActions.openOverlay,
                     onFinish = {
                         viewModel.markOnboardingComplete()
-                        navController.navigate(Routes.HOME) {
+                        val target = if (permissions.allGranted) Routes.HOME else Routes.DIAGNOSTICS
+                        navController.navigate(target) {
                             popUpTo(Routes.ONBOARDING) { inclusive = true }
                         }
                     },
@@ -93,6 +105,7 @@ fun SaraApp(
                     state = liveState,
                     permissions = permissions,
                     backend = backend,
+                    backendError = backendError,
                     bubbleVisible = bubbleVisible,
                     onStart = viewModel::startVoiceSession,
                     onStopSession = viewModel::stopVoiceSession,
@@ -101,6 +114,8 @@ fun SaraApp(
                     onSendText = viewModel::sendText,
                     onOpenSettings = { navController.navigate(Routes.SETTINGS) },
                     onOpenOnboarding = { navController.navigate(Routes.ONBOARDING) },
+                    onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
+                    onRetryLive = viewModel::retryLive,
                 )
             }
 
@@ -109,10 +124,18 @@ fun SaraApp(
                     settings = settings,
                     permissions = permissions,
                     backend = backend,
+                    backendError = backendError,
+                    backendTest = backendTest,
+                    testingBackend = testingBackend,
+                    liveModels = liveModels,
                     modelFetch = modelFetch,
                     onBack = { navController.popBackStack() },
                     onUpdateLive = viewModel::updateLive,
                     onUpdateBackendUrl = viewModel::updateBackendUrl,
+                    onTestBackend = viewModel::testBackend,
+                    onClearBackendTest = viewModel::clearBackendTest,
+                    onFetchLiveModels = viewModel::fetchLiveModels,
+                    onClearLiveModels = viewModel::clearLiveModels,
                     onUpsertAgent = viewModel::upsertAgent,
                     onRemoveAgent = viewModel::removeAgent,
                     onResetAgents = viewModel::resetAgents,
@@ -122,6 +145,16 @@ fun SaraApp(
                     onOpenAccessibility = permissionActions.openAccessibility,
                     onOpenOverlay = permissionActions.openOverlay,
                     onOpenNotificationSettings = permissionActions.openNotificationSettings,
+                    onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
+                )
+            }
+
+            composable(Routes.DIAGNOSTICS) {
+                DiagnosticsScreen(
+                    checks = diagnostics,
+                    running = runningDiagnostics,
+                    onRun = viewModel::runDiagnostics,
+                    onBack = { navController.popBackStack() },
                 )
             }
         }

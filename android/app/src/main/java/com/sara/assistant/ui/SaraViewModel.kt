@@ -5,18 +5,24 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.sara.assistant.agent.RouterEvent
 import com.sara.assistant.backend.BackendClient
+import com.sara.assistant.backend.HealthChecker
+import com.sara.assistant.backend.HealthResult
 import com.sara.assistant.core.SaraContainer
 import com.sara.assistant.core.SaraLog
 import com.sara.assistant.data.AgentConfig
+import com.sara.assistant.data.BackendEndpoint
 import com.sara.assistant.data.LiveSettings
 import com.sara.assistant.data.ModelCatalogClient
 import com.sara.assistant.data.ModelInfo
 import com.sara.assistant.data.ModelListResult
+import com.sara.assistant.data.remote.GeminiModelCatalog
 import com.sara.assistant.live.LiveState
 import com.sara.assistant.live.SaraUiState
 import com.sara.assistant.live.StepStatus
 import com.sara.assistant.service.OverlayBubbleService
 import com.sara.assistant.service.SaraForegroundService
+import com.sara.assistant.ui.diagnostics.DiagnosticCheck
+import com.sara.assistant.ui.diagnostics.DiagnosticsRunner
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -45,6 +51,7 @@ class SaraViewModel(private val container: SaraContainer) : ViewModel() {
     val liveState: StateFlow<SaraUiState> = container.live.state
     val settings: StateFlow<com.sara.assistant.data.SaraSettings> = container.settings.settings
     val backendConnection: StateFlow<BackendClient.ConnectionState> = container.backend.connection
+    val backendError: StateFlow<String?> = container.backend.lastError
 
     private val _permissions = MutableStateFlow(Permissions.snapshot(container.context))
     val permissions: StateFlow<PermissionSnapshot> = _permissions.asStateFlow()
@@ -59,6 +66,27 @@ class SaraViewModel(private val container: SaraContainer) : ViewModel() {
     val notice: StateFlow<Notice?> = _notice.asStateFlow()
 
     private val modelCatalog = ModelCatalogClient()
+    private val geminiCatalog = GeminiModelCatalog()
+    private val healthChecker = HealthChecker()
+    private val diagnosticsRunner = DiagnosticsRunner(container.context, container.settings, healthChecker)
+
+    /** Result of the Settings "Test connection" button. */
+    private val _backendTest = MutableStateFlow<HealthResult?>(null)
+    val backendTest: StateFlow<HealthResult?> = _backendTest.asStateFlow()
+
+    private val _testingBackend = MutableStateFlow(false)
+    val testingBackend: StateFlow<Boolean> = _testingBackend.asStateFlow()
+
+    /** Populated by the Diagnostics screen. */
+    private val _diagnostics = MutableStateFlow<List<DiagnosticCheck>?>(null)
+    val diagnostics: StateFlow<List<DiagnosticCheck>?> = _diagnostics.asStateFlow()
+
+    private val _runningDiagnostics = MutableStateFlow(false)
+    val runningDiagnostics: StateFlow<Boolean> = _runningDiagnostics.asStateFlow()
+
+    /** Live-capable model ids fetched from Google, for the Settings dropdown. */
+    private val _liveModels = MutableStateFlow<List<String>?>(null)
+    val liveModels: StateFlow<List<String>?> = _liveModels.asStateFlow()
 
     init {
         viewModelScope.launch {
@@ -117,6 +145,8 @@ class SaraViewModel(private val container: SaraContainer) : ViewModel() {
 
         container.router.resumeAfterStop()
         SaraForegroundService.start(container.context)
+        // Health-check first so a wrong URL shows a real reason instead of a bare "offline".
+        testBackend()
         container.backend.connect()
         container.live.start()
     }
@@ -150,8 +180,69 @@ class SaraViewModel(private val container: SaraContainer) : ViewModel() {
     }
 
     fun updateBackendUrl(url: String) {
-        container.settings.update { it.copy(backendUrl = url.trim()) }
-        container.backend.disconnect()
+        val parsed = BackendEndpoint.parse(url)
+        parsed.fold(
+            onSuccess = { endpoint ->
+                container.settings.update { it.copy(backendUrl = endpoint.httpBase) }
+                container.backend.disconnect()
+                _backendTest.value = null
+            },
+            onFailure = { error ->
+                _notice.value = Notice.Text(error.message ?: "That backend URL is not valid.")
+            },
+        )
+    }
+
+    /** Settings → "Test connection": GET {base}/health and report exactly what happened. */
+    fun testBackend(url: String = settings.value.backendUrl) {
+        if (_testingBackend.value) return
+        _testingBackend.value = true
+        _backendTest.value = null
+        viewModelScope.launch {
+            _backendTest.value = healthChecker.check(url)
+            _testingBackend.value = false
+        }
+    }
+
+    fun clearBackendTest() {
+        _backendTest.value = null
+    }
+
+    /** Diagnostics: full sweep of local permissions plus both network paths. */
+    fun runDiagnostics() {
+        if (_runningDiagnostics.value) return
+        _runningDiagnostics.value = true
+        viewModelScope.launch {
+            _diagnostics.value = diagnosticsRunner.runAll()
+            _runningDiagnostics.value = false
+        }
+    }
+
+    /** Settings → Gemini Live → "Fetch from Google". */
+    fun fetchLiveModels() {
+        val key = container.settings.current.live.geminiApiKey
+        viewModelScope.launch {
+            geminiCatalog.listLiveModels(key).fold(
+                onSuccess = { models ->
+                    _liveModels.value = models
+                    if (models.isEmpty()) {
+                        _notice.value = Notice.Text("Google returned no Live models for this key.")
+                    }
+                },
+                onFailure = { error ->
+                    _notice.value = Notice.Text(error.message ?: "Could not fetch Live models.")
+                },
+            )
+        }
+    }
+
+    fun clearLiveModels() {
+        _liveModels.value = null
+    }
+
+    /** "Fix & retry" on the home screen: restart the Live session immediately. */
+    fun retryLive() {
+        container.live.retryNow()
     }
 
     fun upsertAgent(agent: AgentConfig) {

@@ -56,11 +56,24 @@ class AgentSpec(BaseModel):
         return value.strip().rstrip("/")
 
     def is_runnable(self) -> bool:
-        """Whether this spec has enough information to actually build a model."""
+        """Whether this spec has enough information to actually build a model.
+
+        GEMINI_NATIVE needs credentials too, but they can come from the environment rather
+        than the spec (the app never sees the backend's GEMINI_API_KEY), so either a spec-level
+        key, a Vertex AI setup, or GEMINI_API_KEY in the environment counts.
+        """
         if not self.enabled or not self.model:
             return False
         if self.provider == "GEMINI_NATIVE":
-            return True
+            if self.api_key.strip():
+                return True
+            import os
+
+            return bool(
+                os.environ.get("GEMINI_API_KEY", "").strip()
+                or os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").strip()
+                or os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
+            )
         return bool(self.base_url and self.api_key)
 
     def to_model(self) -> Any:

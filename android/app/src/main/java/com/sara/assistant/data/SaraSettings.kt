@@ -22,10 +22,17 @@ data class LiveSettings(
 data class SaraSettings(
     val live: LiveSettings = LiveSettings(),
     val agents: List<AgentConfig> = AgentConfig.defaults(),
-    val backendUrl: String = BuildConfig.DEFAULT_BACKEND_WS,
+    /**
+     * Base HTTP URL of the backend, e.g. `http://127.0.0.1:8000`.
+     * The WebSocket URL is derived from this by [BackendEndpoint] — never stored separately,
+     * so the two can never drift apart.
+     */
+    val backendUrl: String = BackendEndpoint.DEFAULT,
     /** Set once the user finishes the permission walkthrough. */
     val onboardingComplete: Boolean = false,
 ) {
+
+    val endpoint: BackendEndpoint get() = BackendEndpoint.parseOrDefault(backendUrl)
     /** Models to try, in order, when opening a Live session. */
     val modelChain: List<String>
         get() = buildList {

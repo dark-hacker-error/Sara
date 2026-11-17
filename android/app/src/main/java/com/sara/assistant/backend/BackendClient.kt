@@ -67,6 +67,10 @@ class BackendClient(private val settings: SettingsRepository) {
     private val _connection = MutableStateFlow(ConnectionState.OFFLINE)
     val connection: StateFlow<ConnectionState> = _connection.asStateFlow()
 
+    /** Human-readable reason for the last failure, shown in the UI instead of a bare "offline". */
+    private val _lastError = MutableStateFlow<String?>(null)
+    val lastError: StateFlow<String?> = _lastError.asStateFlow()
+
     private val _events = MutableSharedFlow<BackendEvent>(extraBufferCapacity = 64)
     val events: SharedFlow<BackendEvent> = _events.asSharedFlow()
 
@@ -77,15 +81,12 @@ class BackendClient(private val settings: SettingsRepository) {
      * can build its agents without a restart.
      */
     fun connect() {
-        val url = settings.current.backendUrl
-        if (url.isBlank()) {
-            _connection.value = ConnectionState.OFFLINE
-            return
-        }
         if (socket != null) return
-
+        val endpoint = settings.current.endpoint
         _connection.value = ConnectionState.CONNECTING
-        val request = Request.Builder().url(url).build()
+        _lastError.value = null
+
+        val request = Request.Builder().url(endpoint.wsUrl).build()
         socket = client.newWebSocket(request, Listener())
         send(helloMessage())
     }
@@ -118,7 +119,13 @@ class BackendClient(private val settings: SettingsRepository) {
             }
         }
         if (_connection.value != ConnectionState.ONLINE) {
-            return Result.failure(IllegalStateException("Backend offline: ${settings.current.backendUrl}"))
+            return Result.failure(
+                IllegalStateException(
+                    _lastError.value
+                        ?: "Backend offline at ${settings.current.endpoint.httpBase}. " +
+                        "Check the URL in Settings, or use USB with `adb reverse tcp:8000 tcp:8000`.",
+                ),
+            )
         }
 
         val deferred = CompletableDeferred<Result<String>>()
@@ -238,8 +245,9 @@ class BackendClient(private val settings: SettingsRepository) {
     private inner class Listener : WebSocketListener() {
 
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            SaraLog.i("Backend connected: ${settings.current.backendUrl}")
+            SaraLog.i("Backend connected: ${settings.current.endpoint.wsUrl}")
             _connection.value = ConnectionState.ONLINE
+            _lastError.value = null
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) = handle(text)
@@ -251,16 +259,55 @@ class BackendClient(private val settings: SettingsRepository) {
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             socket = null
             _connection.value = ConnectionState.OFFLINE
-            failAllPending("Backend closed the connection")
-            _events.tryEmit(BackendEvent.Disconnected(reason))
+            val text = "Backend closed the socket (code $code${if (reason.isBlank()) "" else ", $reason"})."
+            _lastError.value = text
+            failAllPending(text)
+            _events.tryEmit(BackendEvent.Disconnected(text))
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            SaraLog.e("Backend socket failure", t)
+            SaraLog.e("Backend socket failure at ${settings.current.endpoint.wsUrl}", t)
             socket = null
             _connection.value = ConnectionState.OFFLINE
-            failAllPending(t.message ?: "Backend connection failed")
-            _events.tryEmit(BackendEvent.Disconnected(t.message ?: "connection failed"))
+            val text = describeFailure(t, response)
+            _lastError.value = text
+            failAllPending(text)
+            _events.tryEmit(BackendEvent.Disconnected(text))
+        }
+    }
+
+    /**
+     * Turns an OkHttp exception into something actionable. The user's screenshot said
+     * "failed to connect ... after 10000ms", which hides whether it was DNS, a closed port or
+     * a firewall.
+     */
+    private fun describeFailure(t: Throwable, response: Response?): String {
+        val base = settings.current.endpoint.httpBase
+        if (response != null) {
+            return when (response.code) {
+                401, 403 -> "Backend rejected the handshake (HTTP ${response.code}). Check the server log."
+                404 -> "No /ws/session at $base — wrong port or wrong path."
+                else -> "Backend handshake failed: HTTP ${response.code}."
+            }
+        }
+        val message = t.message.orEmpty()
+        return when {
+            t is java.net.UnknownHostException ->
+                "Host not found ($base). Use the PC's LAN IPv4, or USB + adb reverse."
+
+            t is java.net.ConnectException ->
+                "Connection refused at $base. Is the backend running on 0.0.0.0:8000?"
+
+            t is java.net.SocketTimeoutException ->
+                "$base did not answer in ${t.message ?: "timeout"}. Firewall or wrong IP."
+
+            message.contains("CLEARTEXT", ignoreCase = true) ->
+                "Android blocked plain ws:// to $base. Use wss:// (tunnel) instead."
+
+            t is javax.net.ssl.SSLException ->
+                "TLS failed for $base. The tunnel certificate must be publicly trusted."
+
+            else -> "Backend unreachable: ${t.javaClass.simpleName}: ${message.ifBlank { "unknown" }}"
         }
     }
 

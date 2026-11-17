@@ -69,10 +69,15 @@ class SessionHandler:
             while True:
                 raw = await self._websocket.receive_text()
                 await self._handle_frame(raw)
-        except WebSocketDisconnect:
-            logger.info("Phone disconnected")
+        except WebSocketDisconnect as exc:
+            # Close codes matter when debugging: 1006 = abnormal drop, 1000 = clean.
+            logger.info("Phone disconnected (code %s, reason %r)", exc.code, exc.reason)
         except Exception:  # noqa: BLE001 - a broken frame must not leak tasks
-            logger.exception("Session loop failed")
+            logger.exception("Session loop failed; closing")
+            try:
+                await self._websocket.close(code=1011)
+            except Exception:  # noqa: BLE001 - already gone
+                pass
         finally:
             await self._shutdown()
 

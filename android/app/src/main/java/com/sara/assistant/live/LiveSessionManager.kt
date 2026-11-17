@@ -6,11 +6,11 @@ import android.content.pm.PackageManager
 import android.util.Base64
 import androidx.core.content.ContextCompat
 import com.sara.assistant.core.SaraLog
-import com.sara.assistant.data.SaraSettings
 import com.sara.assistant.data.SettingsRepository
 import com.sara.assistant.safety.SafetyGuard
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,17 +27,24 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Owns the Gemini Live session: connect, stream mic audio, play model audio, handle
- * barge-in, execute tool calls, and survive the 15-minute session cap.
+ * Owns the Gemini Live session.
  *
- * Deliberately dumb about *what* to do with a tool call — that's [LiveToolExecutor].
+ * ## The frame-ordering rule that fixes close code 1007
  *
- * Notable behaviours:
- * - **Model fallback**: tries `settings.live.model`, then `fallbackModel`, on connect failure.
- * - **Resumption**: stores `sessionResumptionUpdate.newHandle` and reconnects with it, so a
- *   long conversation continues instead of restarting.
- * - **Barge-in**: server `interrupted` flushes the audio queue; [AudioEngine] also flushes
- *   locally when the mic hears speech, to cut the round-trip latency.
+ * Per the Live API docs: *"Clients should wait for a `BidiGenerateContentSetupComplete`
+ * message before sending any additional messages."*
+ *
+ * Streaming mic audio as soon as the socket object exists violates that: OkHttp queues the
+ * audio frames ahead of the setup message, the server receives audio before it has a session,
+ * and it closes with **1007 (invalid frame payload data)**. So every outbound realtime frame
+ * goes through [setupComplete]. Text typed before the session is ready is queued, not dropped.
+ *
+ * ## Failure policy
+ *
+ * Close codes are classified. Protocol/config codes (1002/1003/1007/1008/1009, 4xxx) stop and
+ * surface the reason with a fix hint — retrying those just repeats the same rejection.
+ * Transient drops retry with exponential backoff (1,2,4,8,16s, max 5 tries), then fall through
+ * to the configured fallback model, and only then give up.
  */
 class LiveSessionManager(
     private val context: Context,
@@ -46,7 +53,7 @@ class LiveSessionManager(
     private val tools: LiveToolExecutor,
 ) {
 
-    private val scope = CoroutineScope(Job())
+    private val scope = CoroutineScope(SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
     private val audio = AudioEngine(scope)
     private val client = OkHttpClient.Builder()
         .pingInterval(15, TimeUnit.SECONDS)
@@ -59,69 +66,124 @@ class LiveSessionManager(
     private var socket: WebSocket? = null
     private var toolJob: Job? = null
 
-    /** Handle from the server for resuming after a disconnect. */
+    /** Handle for session resumption. Cleared whenever the model changes: a handle is only
+     *  meaningful to the model that issued it. */
     @Volatile
     private var resumeHandle: String? = null
+
+    /**
+     * True only after the server's `setupComplete`. Nothing realtime leaves the device before
+     * this flips — see the class comment.
+     */
+    @Volatile
+    private var setupComplete = false
 
     @Volatile
     private var activeModelIndex = 0
 
     @Volatile
-    private var reconnectAttempts = 0
+    private var reconnectAttempt = 0
 
     @Volatile
     private var running = false
 
+    /** Last close code/reason from the server, kept so the UI and logs can show them. */
+    @Volatile
+    private var lastCloseCode: Int? = null
+
+    @Volatile
+    private var lastCloseReason: String = ""
+
+    /** Text typed while the session was still connecting. */
+    private val pendingText = mutableListOf<String>()
+
     private val nextTranscriptId = AtomicLong(1)
     private val nextStepId = AtomicLong(1)
 
-    /** Index into the model chain; guarded by the session coroutine. */
     private val modelChain: List<String>
         get() = settings.current.modelChain
+
+    private val currentModel: String
+        get() = modelChain.getOrElse(activeModelIndex) { modelChain.firstOrNull().orEmpty() }
 
     // ---------------------------------------------------------------- lifecycle
 
     fun start() {
         if (running) return
         if (!hasMicPermission()) {
-            update { it.copy(liveState = LiveState.ERROR, lastError = "Microphone permission is required") }
+            publishError("Microphone permission is required", "Grant it in Sara's setup screen.")
             return
         }
-        val current = settings.current
-        if (current.live.geminiApiKey.isBlank()) {
-            update { it.copy(liveState = LiveState.ERROR, lastError = "Add your Gemini API key in Settings") }
+        if (settings.current.live.geminiApiKey.isBlank()) {
+            publishError(
+                "Gemini API key missing",
+                "Add your key in Settings → Gemini Live.",
+            )
             return
         }
 
         running = true
-        reconnectAttempts = 0
+        reconnectAttempt = 0
         activeModelIndex = 0
+        resumeHandle = null
+        pendingText.clear()
         safety.clearStop()
         audio.onInputFrame = ::onMicFrame
         audio.startCapture()
         audio.startPlayback()
-        connect(current)
+        connect()
     }
 
     fun stop() {
         running = false
+        setupComplete = false
         toolJob?.cancel()
         toolJob = null
         socket?.close(NORMAL_CLOSURE, "client stopped")
         socket = null
+        pendingText.clear()
         audio.onInputFrame = null
         audio.release()
-        update { it.copy(liveState = LiveState.IDLE, statusText = "", inputLevel = 0f, outputLevel = 0f) }
+        update {
+            it.copy(
+                liveState = LiveState.IDLE,
+                gemini = GeminiConnection.IDLE,
+                statusText = "",
+                inputLevel = 0f,
+                outputLevel = 0f,
+            )
+        }
     }
 
-    /** Injects a text turn — used by the overlay bubble and the "Stop" flow. */
+    /** "Fix & retry": clears the failure and starts a fresh attempt immediately. */
+    fun retryNow() {
+        if (!running) {
+            start()
+            return
+        }
+        reconnectAttempt = 0
+        activeModelIndex = 0
+        resumeHandle = null
+        setupComplete = false
+        update { it.copy(failure = null, lastError = null, gemini = GeminiConnection.CONNECTING) }
+        socket?.cancel()
+        socket = null
+        connect()
+    }
+
+    /** Injects a text turn. Queued until the session is ready. */
     fun sendText(text: String) {
-        val active = socket ?: return
-        active.send(LiveProtocol.textInput(text))
-        appendTranscript(fromUser = true, text = text, final = true)
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return
+        if (!setupComplete) {
+            pendingText += trimmed
+            update { it.copy(statusText = "Waiting for Gemini…") }
+            return
+        }
+        socket?.send(LiveProtocol.textInput(trimmed))
+        appendTranscript(fromUser = true, text = trimmed, final = true)
     }
 
-    /** Stops Sara mid-sentence without ending the session. */
     fun bargeIn() {
         audio.flushOutput()
         update { it.copy(liveState = LiveState.LISTENING, statusText = "Listening") }
@@ -129,24 +191,27 @@ class LiveSessionManager(
 
     // ---------------------------------------------------------------- connect
 
-    private fun connect(current: SaraSettings) {
-        val chain = current.modelChain
+    private fun connect() {
+        val chain = modelChain
         if (chain.isEmpty()) {
-            fail("No Live model configured")
+            publishError("No Live model configured", "Pick one in Settings → Gemini Live.")
             return
         }
 
-        val model = chain[activeModelIndex.coerceIn(0, chain.lastIndex)]
-        val apiKey = current.live.geminiApiKey
+        val model = currentModel
         update {
             it.copy(
                 liveState = LiveState.CONNECTING,
+                gemini = GeminiConnection.CONNECTING,
                 statusText = "Connecting to $model…",
-                lastError = null,
+                failure = null,
             )
         }
+        SaraLog.i("Opening Live socket for model=$model")
 
-        val request = Request.Builder().url(LiveProtocol.endpointFor(apiKey)).build()
+        val request = Request.Builder()
+            .url(LiveProtocol.endpointFor(settings.current.live.geminiApiKey))
+            .build()
         socket = client.newWebSocket(request, Listener(model))
     }
 
@@ -170,23 +235,37 @@ class LiveSessionManager(
     // ---------------------------------------------------------------- audio
 
     private fun onMicFrame(pcm: ByteArray, level: Float) {
-        val active = socket ?: return
+        // THE FIX for 1007: never send audio before setupComplete.
+        if (!setupComplete) return
         if (safety.isStopped) return
+        val active = socket ?: return
+
         val encoded = Base64.encodeToString(pcm, Base64.NO_WRAP)
         if (!active.send(LiveProtocol.audioChunk(encoded))) {
-            SaraLog.w("Live audio send failed")
+            SaraLog.w("Live audio send failed (socket busy or closed)")
             return
         }
         update { it.copy(inputLevel = level) }
     }
 
-    // ---------------------------------------------------------------- inbound events
+    // ---------------------------------------------------------------- inbound
 
     private fun handle(event: LiveServerEvent) {
         when (event) {
             is LiveServerEvent.SetupComplete -> {
-                reconnectAttempts = 0
-                update { it.copy(liveState = LiveState.LISTENING, statusText = "Listening") }
+                setupComplete = true
+                reconnectAttempt = 0
+                SaraLog.i("Live setupComplete (model=$currentModel)")
+                update {
+                    it.copy(
+                        liveState = LiveState.LISTENING,
+                        gemini = GeminiConnection.CONNECTED,
+                        statusText = "Listening",
+                        failure = null,
+                        lastError = null,
+                    )
+                }
+                flushPendingText()
             }
 
             is LiveServerEvent.Audio -> {
@@ -195,8 +274,6 @@ class LiveSessionManager(
             }
 
             is LiveServerEvent.InputTranscript -> {
-                // Feed the safety gate: an affirmative reply here is what unlocks a
-                // previously refused sensitive action.
                 safety.noteUserUtterance(event.text)
                 appendTranscript(fromUser = true, text = event.text, final = event.final)
             }
@@ -228,11 +305,26 @@ class LiveSessionManager(
             }
 
             is LiveServerEvent.GoAway -> {
-                SaraLog.i("Server going away (${event.timeLeft}); will reconnect")
-                reconnectAfterGoAway()
+                SaraLog.i("Server goAway (${event.timeLeft}); resuming")
+                // Not a failure: reconnect straight away with the resumption handle.
+                setupComplete = false
+                reconnectAttempt = 0
+                socket?.cancel()
+                socket = null
+                if (running) connect()
             }
 
             is LiveServerEvent.Usage -> SaraLog.d("Live tokens used: ${event.totalTokens}")
+        }
+    }
+
+    private fun flushPendingText() {
+        if (pendingText.isEmpty()) return
+        val queued = pendingText.toList()
+        pendingText.clear()
+        queued.forEach { text ->
+            socket?.send(LiveProtocol.textInput(text))
+            appendTranscript(fromUser = true, text = text, final = true)
         }
     }
 
@@ -253,50 +345,127 @@ class LiveSessionManager(
         }
     }
 
-    // ---------------------------------------------------------------- reconnect
+    // ---------------------------------------------------------------- failure policy
 
-    private fun reconnectAfterGoAway() {
-        if (!running) return
-        scheduleReconnect("server asked us to reconnect")
+    /**
+     * Codes that will fail again identically no matter how often we retry: the setup is
+     * wrong, the key is wrong, or the model does not exist. Retrying these wastes the user's
+     * time and hides the real error.
+     */
+    private fun isPermanentClose(code: Int): Boolean = when (code) {
+        1002, 1003, 1007, 1008, 1009 -> true
+        in 4400..4499 -> true
+        else -> false
     }
 
+    private fun hintForClose(code: Int?): String {
+        if (code == null) {
+            return "Connection lost. Check your network and tap Retry."
+        }
+        return when (code) {
+            1007 -> "The server rejected a frame. This is almost always a wrong Live model id, or " +
+                "a setup field that model does not support. Pick a model in Settings → Gemini Live " +
+                "(current stable: gemini-3.8-live)."
+
+            1008 -> "The Gemini API rejected the request. Check the API key, and that this model is " +
+                "available to your key."
+
+            1003 -> "Unsupported data type. Native-audio Live models accept AUDIO responses only."
+
+            1002 -> "Protocol error: the setup JSON was rejected. Reset the Live model and voice to defaults."
+
+            1009 -> "Frame too large. Please report this with the Logcat tag SaraWS."
+
+            in 4400..4499 -> "The server refused this session. Usually a bad key or a model that is " +
+                "not enabled for it."
+
+            else -> "Connection lost. Check your network and tap Retry."
+        }
+    }
+
+    /** Transient drop: exponential backoff 1,2,4,8,16s, max 5 tries, then the fallback model. */
     private fun scheduleReconnect(reason: String) {
         if (!running) return
-        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-            // Exhausted the current model; fall to the next one in the chain.
+        setupComplete = false
+        audio.flushOutput()
+
+        if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
             val chain = modelChain
             if (activeModelIndex < chain.lastIndex) {
                 activeModelIndex++
-                reconnectAttempts = 0
-                SaraLog.i("Switching to fallback model ${chain[activeModelIndex]}")
+                reconnectAttempt = 0
+                // A resumption handle belongs to the model that issued it.
+                resumeHandle = null
+                SaraLog.i("Falling back to ${currentModel}")
                 update {
                     it.copy(
-                        statusText = "Switching to ${chain[activeModelIndex]}…",
-                        lastError = null,
+                        statusText = "Trying fallback model $currentModel…",
+                        failure = null,
                     )
                 }
             } else {
-                fail("Reconnect attempts exhausted ($reason)")
+                publishFailure(
+                    LiveFailure(
+                        code = lastCloseCode,
+                        reason = lastCloseReason.ifBlank { reason },
+                        permanent = false,
+                        hint = hintForClose(lastCloseCode) + " All retries and the fallback model failed.",
+                    ),
+                )
                 return
             }
         }
 
-        reconnectAttempts++
-        val backoff = RECONNECT_BASE_MS * reconnectAttempts
-        update { it.copy(liveState = LiveState.CONNECTING, statusText = "Reconnecting…") }
+        reconnectAttempt++
+        val backoffSeconds = 1L shl (reconnectAttempt - 1) // 1, 2, 4, 8, 16
+        SaraLog.w(
+            "Live reconnect #$reconnectAttempt in ${backoffSeconds}s (reason=$reason, " +
+                "code=$lastCloseCode)",
+        )
+        update {
+            it.copy(
+                liveState = LiveState.CONNECTING,
+                gemini = GeminiConnection.CONNECTING,
+                statusText = "Reconnecting in ${backoffSeconds}s (attempt $reconnectAttempt/$MAX_RECONNECT_ATTEMPTS)…",
+            )
+        }
         scope.launch {
-            delay(backoff)
-            if (!running) return@launch
+            delay(backoffSeconds * 1_000)
+            if (!running || setupComplete) return@launch
             socket?.cancel()
             socket = null
-            connect(settings.current)
+            connect()
         }
     }
 
-    private fun fail(message: String) {
-        SaraLog.e("Live session failed: $message")
-        update { it.copy(liveState = LiveState.ERROR, lastError = message, statusText = "") }
+    private fun publishFailure(failure: LiveFailure) {
         running = false
+        setupComplete = false
+        audio.flushOutput()
+        SaraLog.e(
+            "Live session failed: code=${failure.code} reason='${failure.reason}' " +
+                "permanent=${failure.permanent}",
+        )
+        update {
+            it.copy(
+                liveState = LiveState.ERROR,
+                gemini = GeminiConnection.ERROR,
+                statusText = "",
+                failure = failure,
+                lastError = failure.hint,
+            )
+        }
+    }
+
+    private fun publishError(message: String, hint: String) {
+        update {
+            it.copy(
+                liveState = LiveState.ERROR,
+                gemini = GeminiConnection.ERROR,
+                lastError = hint,
+                failure = LiveFailure(null, message, permanent = true, hint = hint),
+            )
+        }
     }
 
     // ---------------------------------------------------------------- state helpers
@@ -310,7 +479,6 @@ class LiveSessionManager(
         val current = _state.value.transcript
         val last = current.lastOrNull()
         val next = if (last != null && last.fromUser == fromUser && !last.final) {
-            // Interim transcriptions replace the previous unsettled line.
             current.dropLast(1) + last.copy(text = text, final = final)
         } else {
             current + TranscriptLine(
@@ -323,7 +491,6 @@ class LiveSessionManager(
         _state.value = _state.value.copy(transcript = next.takeLast(MAX_TRANSCRIPT_LINES))
     }
 
-    /** Called by the ViewModel when a delegated task emits progress. */
     fun pushStep(agent: String, detail: String, status: StepStatus) {
         val steps = _state.value.taskSteps + TaskStep(
             id = nextStepId.getAndIncrement(),
@@ -366,11 +533,9 @@ class LiveSessionManager(
 
     private inner class Listener(private val model: String) : WebSocketListener() {
 
-        private var setupSent = false
-
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            SaraLog.i("Live socket open ($model)")
-            setupSent = true
+            SaraLog.i("Live socket open (model=$model)")
+            setupComplete = false
             sendSetup(model)
         }
 
@@ -378,40 +543,73 @@ class LiveSessionManager(
             LiveProtocol.decodeAll(text).forEach(::handle)
         }
 
-        /**
-         * The Live endpoint frequently delivers JSON in binary frames, so both callbacks are
-         * wired to the same decoder. Missing this is the classic "audio only, no transcripts"
-         * bug.
-         */
+        /** The Live endpoint often sends JSON in binary frames; both paths share the decoder. */
         override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
             LiveProtocol.decodeAll(bytes.utf8()).forEach(::handle)
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            SaraLog.w("Live socket closing: code=$code reason='$reason'")
             webSocket.close(NORMAL_CLOSURE, null)
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            SaraLog.i("Live socket closed ($code $reason)")
+            lastCloseCode = code
+            lastCloseReason = reason
+            setupComplete = false
             socket = null
-            if (running) scheduleReconnect("closed $code")
+
+            // Log exactly what the user needs to see, with a stable tag.
+            SaraLog.e("SaraWS close code=$code reason='$reason' model=$model")
+
+            if (!running) return
+
+            if (isPermanentClose(code)) {
+                publishFailure(
+                    LiveFailure(
+                        code = code,
+                        reason = reason.ifBlank { "no reason given by server" },
+                        permanent = true,
+                        hint = hintForClose(code),
+                    ),
+                )
+            } else if (code != NORMAL_CLOSURE) {
+                scheduleReconnect("closed $code")
+            }
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            SaraLog.e("Live socket failure (model=$model, setupSent=$setupSent)", t)
+            setupComplete = false
             socket = null
+            val httpCode = response?.code
+            SaraLog.e(
+                "SaraWS failure model=$model http=${httpCode ?: "-"} " +
+                    "error=${t.javaClass.simpleName}: ${t.message}",
+                t,
+            )
             if (!running) return
-            val detail = response?.code?.let { "HTTP $it: ${t.message}" } ?: t.message
-            update { it.copy(statusText = "Connection problem…") }
-            scheduleReconnect(detail ?: "socket failure")
+
+            if (httpCode != null && httpCode in 400..499) {
+                publishFailure(
+                    LiveFailure(
+                        code = httpCode,
+                        reason = t.message ?: "HTTP $httpCode",
+                        permanent = true,
+                        hint = "Gemini rejected the connection with HTTP $httpCode. Check the API key " +
+                            "and the Live model id in Settings.",
+                    ),
+                )
+                return
+            }
+
+            scheduleReconnect(t.javaClass.simpleName + ": " + (t.message ?: "socket failure"))
         }
     }
 
-    private companion object {
-        const val NORMAL_CLOSURE = 1000
-        const val MAX_RECONNECT_ATTEMPTS = 3
-        const val RECONNECT_BASE_MS = 700L
-        const val MAX_TRANSCRIPT_LINES = 200
-        const val MAX_TASK_STEPS = 40
+    companion object {
+        private const val NORMAL_CLOSURE = 1000
+        private const val MAX_RECONNECT_ATTEMPTS = 5
+        private const val MAX_TRANSCRIPT_LINES = 200
+        private const val MAX_TASK_STEPS = 40
     }
 }

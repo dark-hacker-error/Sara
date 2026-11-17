@@ -1,11 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Cleartext is allowed only for local development backends. Production must be wss/https. -->
+<!--
+  Sara talks to a backend that the user runs themselves — on the same phone (USB + adb
+  reverse), on their PC over Wi-Fi, or behind a tunnel.
+
+  Android's <domain-config> matches hostnames only: it cannot express CIDR ranges, so
+  "192.168.0.0" would be treated as a literal host and 192.168.1.5 would still be blocked.
+  Since the backend address is user-supplied and usually a private-LAN IP, cleartext is
+  enabled for this sideloaded build.
+
+  If you deploy Sara's backend publicly, switch the scheme to https/wss and set
+  cleartextTrafficPermitted="false" here — the app already builds wss:// URLs from an
+  https:// base URL.
+-->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="false" />
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="false">10.0.2.2</domain>
-        <domain includeSubdomains="false">127.0.0.1</domain>
-        <domain includeSubdomains="false">localhost</domain>
-        <domain includeSubdomains="false">192.168.0.0</domain>
-    </domain-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
 </network-security-config>

@@ -138,15 +138,26 @@ class SettingsRepository(context: Context) {
             }
         }
 
+        val storedBackend = root.optString("backend_url", BackendEndpoint.DEFAULT)
+
+        // Migration: earlier builds stored a WebSocket URL and defaulted to the emulator alias,
+        // which does not resolve on a real phone. Only the exact old default is rewritten;
+        // anything the user actually typed is normalised and kept.
+        val migratedBackend = when (storedBackend.trim()) {
+            LEGACY_EMULATOR_WS_DEFAULT, "", "ws://10.0.2.2:8000/ws/session" -> BackendEndpoint.DEFAULT
+            else -> BackendEndpoint.parseOrDefault(storedBackend).httpBase
+        }
+
         return SaraSettings(
             live = live,
             agents = agents,
-            backendUrl = root.optString("backend_url", SaraSettings().backendUrl),
+            backendUrl = migratedBackend,
             onboardingComplete = root.optBoolean("onboarding_complete", false),
         )
     }
 
     private companion object {
         const val KEY_SETTINGS = "sara_settings_v1"
+        const val LEGACY_EMULATOR_WS_DEFAULT = "ws://10.0.2.2:8000/ws/session"
     }
 }
