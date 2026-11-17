@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Sara</string>
+    <string name="accessibility_service_label">Sara phone control</string>
+    <string name="accessibility_service_description">Lets Sara read the screen and perform taps, swipes, scrolling and text input on your behalf. Needed for voice-driven phone control.</string>
+
+    <string name="notif_channel_voice">Voice session</string>
+    <string name="notif_channel_bubble">Floating bubble</string>
+    <string name="notif_voice_title">Sara is listening</string>
+    <string name="notif_voice_text">Tap to open Sara</string>
+    <string name="notif_bubble_title">Sara bubble active</string>
+    <string name="notif_bubble_text">Tap the bubble to talk to Sara</string>
+    <string name="action_stop">Stop</string>
+</resources>

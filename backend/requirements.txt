@@ -1,0 +1,8 @@
+# Sara backend — agent orchestration for the Android app.
+#
+# Runtime deps only. `google-adk` pulls in google-genai, FastAPI, uvicorn, websockets and pydantic.
+google-adk>=2.14,<3
+# ADK's LiteLlm wrapper needs litellm installed separately (google-adk[extensions]).
+litellm>=1.84
+# httpx is used by the /models auto-fetch endpoint and the fetch_url tool.
+httpx>=0.28
