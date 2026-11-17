@@ -69,7 +69,8 @@ jobs:
           elif [[ -n "${{ github.event.inputs.version_name }}" ]]; then
             NAME="${{ github.event.inputs.version_name }}"
           else
-            NAME="0.1.${GITHUB_RUN_NUMBER}"
+            # One rolling release: every push to main refreshes this same tag/asset.
+            NAME="0.1.0"
           fi
           echo "name=${NAME}" >> "$GITHUB_OUTPUT"
           echo "code=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
@@ -130,13 +131,18 @@ jobs:
           TAG="v${{ steps.version.outputs.name }}"
           NOTES="Sara ${TAG}
 
-          Automated build from ${GITHUB_SHA:0:7}.
+          Android voice assistant: Gemini Live for real-time speech, a FastAPI + ADK
+          backend for planning, accessibility for phone control.
 
-          Install: download the APK, allow install from unknown sources, then grant Microphone,
-          Accessibility, overlay and notification permissions in Sara's setup screen."
+          Install: download the APK, allow install from unknown sources, then grant
+          Microphone, Accessibility, overlay and notification permissions in Sara's setup
+          screen. Add a Gemini API key and point Settings at your backend.
+
+          What is still a stub is listed in the README."
 
           if gh release view "${TAG}" >/dev/null 2>&1; then
             gh release upload "${TAG}" "${{ steps.apk.outputs.path }}" --clobber
+            gh release edit "${TAG}" --notes "${NOTES}"
           else
             gh release create "${TAG}" "${{ steps.apk.outputs.path }}" \
               --title "Sara ${TAG}" \

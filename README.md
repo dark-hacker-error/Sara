@@ -222,33 +222,36 @@ Device actions: `tap`, `long_press`, `swipe`, `scroll`, `tap_text`, `tap_node`, 
 
 ## 8. What works today
 
+- **A signed, installable APK is built and published by CI** at
+  [Releases](https://github.com/dark-hacker-error/Sara/releases) (`sara-0.1.0.apk`,
+  APK Signature Scheme v2, 4 ABIs, minSdk 28). Every push to `main` refreshes it.
 - Live session: connect, mic streaming, 24 kHz playback, echo cancellation, barge-in,
   input/output transcription, reconnect with resumption, model fallback.
 - Tool calling end to end: `delegate_task` → ADK planner → subagent → device action on the
   phone → result back to Live as a `toolResponse`.
 - Accessibility: read the UI tree, tap by text/index/coordinate, long-press, swipe, scroll,
-  type text, back/home/recents, app launch, installed-app listing — all verified to compile
-  and wired through the WebSocket round trip.
+  type text, back/home/recents, app launch, installed-app listing — all wired through the
+  WebSocket round trip.
 - Per-subagent base URL / key / model, runtime config reload, `/v1/models/list` auto-fetch
   with key/URL/timeout/empty error classification and free-model tagging.
 - UI: onboarding with permission deep links, animated state orb (listening / thinking /
   speaking / acting), live transcript, task-step timeline, settings, floating bubble.
-- 16 backend tests pass offline; the Android app compiles to a debug APK.
+- 16 backend tests pass offline.
 
 ## 9. What is a stub or missing (read this)
 
 | Item | Status |
 | --- | --- |
 | **Screenshot / MediaProjection vision** | **Not implemented.** No screen-capture code exists. Listed as optional in the brief; the agent works from the accessibility tree only. The manifest permission was removed rather than left dangling. |
-| **End-to-end device run** | Verified by compilation and by the backend test suite. No emulator/device was available in the build environment, so the accessibility actions have **not** been executed against a live UI. Treat first-run testing as required. |
-| **Live session against the real API** | Not exercised — that needs a live API key and a device. Protocol shape is taken from the API reference, not from a successful handshake. |
+| **End-to-end run on a phone** | The APK compiles, is signed, and the backend suite passes. No Android device/emulator was available here, so the accessibility actions have **not** been executed against a live UI, and the Live handshake has **not** been made against the real API (that needs a real key). Treat first-run testing as required. |
 | **Web search quality** | `web_search` scrapes DuckDuckGo's no-JS HTML endpoint and `fetch_url` strips tags by regex. Brittle by design and documented as such. Gemini-native research agents use `google_search` grounding instead. |
 | **Subagent planner routing** | The app's `kind` hint (`device`/`research`) is passed to the planner as prompt context. ADK routes by model decision, so a hint is a nudge, not a route. |
 | **Multi-step retry policy** | Expressed in the orchestrator's instruction plus `RunConfig(max_llm_calls=25)`. There is no hard state machine with explicit retry/ask-user transitions yet. |
 | **Vision-based step verification** | Verification is limited to re-reading the accessibility tree. No pixel comparison. |
-| **Release signing** | CI falls back to debug signing unless `SARA_KEYSTORE_*` secrets are set. Debug-signed builds can't upgrade over each other from different CIs. |
-| **Streaming TTS of planner output** | Planner text arrives as a whole per event; no incremental speech while a long task runs. |
+| **Release signing** | CI falls back to debug signing unless `SARA_KEYSTORE_*` secrets are set, so builds from different CIs may not upgrade over each other. |
+| **Streaming TTS of planner output** | Planner text arrives whole per event; no incremental speech while a long task runs. |
 | **EncryptedSharedPreferences deprecation** | `androidx.security:security-crypto` is deprecated upstream with no drop-in replacement. Used as requested; expect a deprecation warning. |
+| **Settings load is synchronous** | `SettingsRepository` reads EncryptedSharedPreferences in its constructor on the main thread. Fine for a small blob, but it is a cold-start cost worth moving off-thread later. |
 
 ---
 
@@ -261,7 +264,8 @@ manual dispatch:
    an artifact, then creates or updates a GitHub Release with `sara-<version>.apk`.
 2. `backend-tests` — installs `requirements-dev.txt` and runs `pytest`.
 
-Version comes from the tag (`v0.2.0` → `0.2.0`), a manual input, or `0.1.<run-number>`.
+Version comes from the tag (`v0.2.0` → `0.2.0`), a manual input, or defaults to `0.1.0`.
+A push to `main` refreshes the same rolling `v0.1.0` release; tagging creates a new one.
 
 To publish a real release build, add these repository secrets: `SARA_KEYSTORE_PATH`,
 `SARA_KEYSTORE_PASSWORD`, `SARA_KEY_ALIAS`, `SARA_KEY_PASSWORD`. Without them the workflow
