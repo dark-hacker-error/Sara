@@ -50,13 +50,6 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // The key may need migrating to EncryptedSharedPreferences; doing it off the main
-        // thread keeps first launch smooth.
-        lifecycleScope.launch {
-            runCatching { container.settings.current }
-                .onFailure { SaraLog.e("Settings load failed", it) }
-        }
-
         setContent {
             SaraTheme {
                 androidx.compose.foundation.layout.Box(
